@@ -24,7 +24,13 @@ from apple_docs_mcp.responses import (
     search_payload,
     status_payload,
 )
-from apple_docs_mcp.service import MODES, SearchOutcome, StatusReport, texts_for
+from apple_docs_mcp.service import (
+    DEFAULT_MODE,
+    MODES,
+    SearchOutcome,
+    StatusReport,
+    texts_for,
+)
 from apple_docs_mcp.service import build as build_index
 from apple_docs_mcp.service import document as get_page
 from apple_docs_mcp.service import frameworks as list_frameworks
@@ -128,7 +134,7 @@ def _build_parser() -> argparse.ArgumentParser:
     search.add_argument("--framework", action="append", dest="frameworks", default=None)
     search.add_argument("--kind", action="append", dest="kinds", default=None)
     search.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
-    search.add_argument("--mode", choices=MODES, default="offline")
+    search.add_argument("--mode", choices=MODES, default=DEFAULT_MODE)
     search.add_argument("--full", action="store_true", dest="full_text")
     search.add_argument("--json", action="store_true", dest="as_json")
 

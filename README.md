@@ -31,13 +31,49 @@ of a fresh process separately from the steady state: 5 ms first call, 17 ms mean
 over six queries in a standalone process, 5.9 ms mean over the same six in a
 running MCP server that warmed itself at startup.
 
-Judged query by query on top three results, the offline ranking was better on
-four of those six queries, a wash on one, and worse on one ("how do I make a
-haptic feedback" — the bridge found the conceptual article, the offline pass
-found the API). The reason is visible in the numbers: **39 of the 118 documents
-the bridge returned across those queries are under 100 characters**, because it
-ranks short "…: Relationships" stubs highly, and a stub cannot answer a
-question. That is also why `mode: semantic` and `mode: hybrid` exist.
+### Evaluated, not asserted
+
+Six queries and an opinion is not evidence, so ranking is measured on two sets —
+`uv run python tools/evaluate.py`, ground truth stated per query:
+
+* **40 identifier queries**, sampled from the corpus. The query is a symbol
+  page's own title, the expected answer is that page, and no judgement is
+  involved: "does the engine find the API it was named after".
+* **12 questions** ("how do I download a file and show progress"). Answers were
+  judged from the *pooled* results of both engines, so an equally good page is
+  not marked wrong for not being the one the question writer had in mind.
+
+Recall, with `@k` meaning the expected page is in the first k results:
+
+| Identifier queries (n=40) | @1 | @3 | @5 | mean latency |
+|---|---|---|---|---|
+| this server, `offline` | **87.5%** | **92.5%** | **92.5%** | 1.9 ms |
+| this server, `auto` (default) | **87.5%** | **92.5%** | **92.5%** | 1.5 ms |
+| Xcode `DocumentationSearch` | 57.5% | 65.0% | 67.5% | 329 ms |
+
+| Question queries (n=12) | @1 | @3 | @5 | mean latency |
+|---|---|---|---|---|
+| this server, `offline` | 41.7% | 66.7% | 75.0% | 27.7 ms |
+| this server, `auto` | 41.7% | **83.3%** | **91.7%** | 296 ms |
+| Xcode `DocumentationSearch` | 41.7% | 83.3% | 91.7% | 325 ms |
+
+Read that honestly, because it cuts both ways:
+
+* **For a named API — the lookup an agent makes constantly — this server is
+  clearly better and about 200x faster, with no approval dialog.** The bridge
+  scored 65% at @3; the local index scored 92.5%.
+* **For a question, the bridge is better than `/offline`** (91.7% vs 75.0% at
+  @5). Semantic search reaches wording that no term index has seen, and this
+  project does not reproduce Apple's embedding space (measured cosine ≈ 0.01–0.03
+  for the very same page text), so it does not pretend to.
+* **`auto` — the default — is never worse than the better engine on either
+  set**, because it reads the query and picks. It answers names locally in about
+  a millisecond and asks the bridge only for questions.
+
+The bridge's own weakness is visible in the data as well: **39 of the 118
+documents it returned across an earlier six-query run were under 100
+characters**, because it ranks short "…: Relationships" stubs highly, and a stub
+cannot answer a question.
 
 Two things this project does **not** claim. It does not reproduce Xcode's
 semantic ranker offline: the stored page vectors are 512-dimensional but live in
@@ -93,9 +129,10 @@ The playbook is also served as the `swift://playbook` resource, the
 
 | Mode | What answers | Measured latency | Xcode needed |
 |---|---|---|---|
-| `offline` (default) | the local corpus index | 3–23 ms in the MCP server | no |
+| `auto` (default) | the index for API names, the bridge for questions | 1.5 ms / 296 ms | only for questions |
+| `offline` | the local corpus index | 2–28 ms | no |
 | `semantic` | Xcode's bridge | 185–739 ms | yes, approved |
-| `hybrid` | both, fused by reciprocal rank | 313–434 ms | no (falls back to offline) |
+| `hybrid` | both, fused by reciprocal rank | 308–313 ms | no (falls back) |
 
 `hybrid` labels each hit `local`, `bridge`, or `hybrid`, so a caller can see
 where an answer came from. If the bridge fails in `hybrid`, the offline results
@@ -182,10 +219,11 @@ where it looked instead of returning nothing.
 ## Development
 
 ```bash
-uv run pytest tests/ -q                    # 125 tests, no Xcode needed
+uv run pytest tests/ -q                    # 148 tests, no Xcode needed
 uv run pytest tests/ -m integration        # live bridge tests
-uv run python tools/benchmark.py           # the comparison table above
-uv run ruff check src tests
+uv run python tools/benchmark.py           # latency, offline against the bridge
+uv run python tools/evaluate.py            # recall, on judged ground truth
+uv run ruff check src tests tools
 ```
 
 Unit tests build synthetic corpus and skill fixtures, so they run anywhere. The

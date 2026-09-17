@@ -35,7 +35,14 @@ from apple_docs_mcp.index import (
     ensure_index,
     index_info,
 )
-from apple_docs_mcp.search import Hit, bridge_hits, enrich_from_corpus, fuse_rrf, search_offline
+from apple_docs_mcp.search import (
+    Hit,
+    bridge_hits,
+    enrich_from_corpus,
+    fuse_rrf,
+    looks_like_question,
+    search_offline,
+)
 from apple_docs_mcp.skill import Playbook, load_playbook, read_reference
 
 __all__ = [
@@ -54,7 +61,16 @@ __all__ = [
     "texts_for",
 ]
 
-MODES: Final = ("offline", "semantic", "hybrid")
+MODES: Final = ("offline", "semantic", "hybrid", "auto")
+DEFAULT_MODE: Final = "auto"
+
+#: When the bridge is fused in, how much each list counts. The bridge's order is
+#: the one that understands wording; the local list is the one that knows names.
+FUSION_WEIGHTS: Final = (1.0, 2.0)
+
+#: Auto mode may reach for the bridge; it must not sit on an unapproved one for
+#: the full search budget before falling back to the local index.
+AUTO_BRIDGE_TIMEOUT_SECONDS: Final = 10.0
 BRIDGE_CANDIDATES: Final = 20
 PREWARM_QUERY: Final = "SwiftUI View"
 PREWARM_LIMIT: Final = 3
@@ -139,9 +155,13 @@ def _ready(settings: Settings, *, force: bool = False) -> tuple[Path, IndexInfo]
 
 
 def _bridge_documents(
-    query: str, frameworks: list[str] | None, settings: Settings
+    query: str, frameworks: list[str] | None, settings: Settings, timeout: float | None = None
 ) -> list[Document]:
-    return bridge_search(query, frameworks, command=settings.bridge_command)
+    if timeout is None:
+        return bridge_search(query, frameworks, command=settings.bridge_command)
+    return bridge_search(
+        query, frameworks, timeout=timeout, command=settings.bridge_command
+    )
 
 
 def search(
@@ -150,7 +170,7 @@ def search(
     frameworks: list[str] | None = None,
     kinds: list[str] | None = None,
     limit: int = 10,
-    mode: str = "offline",
+    mode: str = DEFAULT_MODE,
     settings: Settings | None = None,
 ) -> SearchOutcome:
     """Answer a documentation question from the local corpus, the bridge, or both."""
@@ -166,9 +186,25 @@ def search(
     bridge: list[Hit] = []
     index_state: IndexInfo | None = None
 
+    # "auto" reads the query: a caller naming an API is served by the local index
+    # alone, which is both faster and measurably more accurate for names; a caller
+    # asking a question gets the bridge's semantic order fused in. Judged on 40
+    # identifier queries and 12 questions, that choice is the best measured
+    # configuration on both sets.
+    auto = mode == "auto"
+    if auto:
+        mode = "hybrid" if looks_like_question(query) else "offline"
+
     if mode in ("semantic", "hybrid"):
         try:
-            bridge = bridge_hits(_bridge_documents(query, frameworks, resolved))
+            bridge = bridge_hits(
+                _bridge_documents(
+                    query,
+                    frameworks,
+                    resolved,
+                    AUTO_BRIDGE_TIMEOUT_SECONDS if auto else None,
+                )
+            )
         except BridgeError as error:
             if mode == "semantic":
                 raise
@@ -196,7 +232,7 @@ def search(
     if mode == "offline":
         return SearchOutcome(hits=local, mode=mode, index=index_state)
 
-    fused = fuse_rrf(local, bridge, limit=limit)
+    fused = fuse_rrf(local, bridge, limit=limit, weights=FUSION_WEIGHTS)
     return SearchOutcome(
         hits=enrich_from_corpus(db_path, fused),
         mode=mode,

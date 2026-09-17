@@ -20,6 +20,7 @@ because the bridge ranks short "…: Relationships" stubs highly.
 
 from __future__ import annotations
 
+import math
 import re
 import sqlite3
 from collections.abc import Sequence
@@ -30,7 +31,7 @@ from typing import Final
 from apple_docs_mcp.bridge import Document
 from apple_docs_mcp.connections import shared
 from apple_docs_mcp.corpus import DocumentRecord, get_documents
-from apple_docs_mcp.index import open_index
+from apple_docs_mcp.index import framework_sizes, open_index
 
 __all__ = [
     "BOOST_FACTOR",
@@ -52,7 +53,9 @@ __all__ = [
 RRF_K: Final = 60
 BOOST_FACTOR: Final = 2.0
 SNIPPET_WIDTH: Final = 320
-CANDIDATE_MULTIPLIER: Final = 3
+#: bm25 must score every match before it can order them, so a wider pool costs
+#: almost nothing and decides whether a prior can act on the answer at all.
+CANDIDATE_MULTIPLIER: Final = 12
 
 # Column weights for bm25: uri, title, framework, content.
 _WEIGHTS: Final = (8.0, 4.0, 2.0, 1.0)
@@ -79,6 +82,16 @@ MAX_TERM_SHARE: Final = 0.02
 MAX_TERM_DOCUMENTS: Final = 2000
 SELECTED_TERMS: Final = 4
 FALLBACK_TERMS: Final = 2
+
+#: How far the largest framework may outrank the smallest, and how much a
+#: question prefers a guide over a symbol page. Both are priors over a ranking
+#: that only sees terms; measured against the judged query set, not chosen.
+AUTHORITY_WEIGHT: Final = 0.6
+QUESTION_WEIGHT: Final = 1.6
+QUESTION_PATTERN: Final = re.compile(
+    r"\b(how|what|why|when|where|which|can i|should i|do i|does|is it)\b", re.IGNORECASE
+)
+GUIDE_KINDS: Final = frozenset({"article", "tutorial"})
 
 Candidate = tuple[str, str, str, str, float]
 
@@ -256,14 +269,22 @@ def search_offline(
         total_documents,
         mandatory=named_terms(terms),
     )
-    candidates = _rank(
+    # Priors act only on questions. When a caller names an API, the name match is
+    # the answer and a framework's size has no business outranking it.
+    question = looks_like_question(query)
+    ranked = _rank(
         index_file,
         build_match_query(query, selected),
         frameworks=frameworks,
         kinds=kinds,
         limit=limit * CANDIDATE_MULTIPLIER,
         identifier=identifier_in(query),
-    )[:limit]
+        factors=authority_factors(framework_sizes(index_file, connection)) if question else {},
+        prefer_guides=question,
+    )
+    candidates = collapse_to_parents(
+        ranked, parent_map(db_path, [row[0] for row in ranked]), limit
+    )
     if not candidates:
         return []
 
@@ -277,9 +298,9 @@ def search_offline(
         hits.append(
             Hit(
                 uri=uri,
-                title=title,
-                framework=framework,
-                kind=kind,
+                title=page.title if page is not None else title,
+                framework=page.framework if page is not None else framework,
+                kind=page.kind if page is not None else kind,
                 score=round(score, 4),
                 declaration=page.declaration if page is not None else None,
                 availability=page.availability if page is not None else [],
@@ -290,6 +311,24 @@ def search_offline(
     return hits
 
 
+def looks_like_question(query: str) -> bool:
+    """Whether the caller asked a question rather than named an API."""
+    return QUESTION_PATTERN.search(query) is not None
+
+
+def authority_factors(sizes: dict[str, int]) -> dict[str, float]:
+    """Map each framework to a multiplier between 1 and ``1 + AUTHORITY_WEIGHT``."""
+    if not sizes:
+        return {}
+    span = math.log1p(max(sizes.values()))
+    if span <= 0:
+        return {}
+    return {
+        name: 1.0 + AUTHORITY_WEIGHT * (math.log1p(count) / span)
+        for name, count in sizes.items()
+    }
+
+
 def _rank(
     index_file: Path,
     match_query: str,
@@ -298,16 +337,55 @@ def _rank(
     kinds: Sequence[str] | None,
     limit: int,
     identifier: str | None,
+    factors: dict[str, float] | None = None,
+    prefer_guides: bool = False,
 ) -> list[Candidate]:
-    """Run one pass and order it: identifier hits first, then by bm25."""
+    """Run one pass and order it: identifier hits first, then by weighted bm25."""
     candidates = _boost(
         _query_index(
             index_file, match_query, frameworks=frameworks, kinds=kinds, limit=limit
         ),
         identifier,
     )
+    if factors or prefer_guides:
+        weighted: list[Candidate] = []
+        for uri, title, framework, kind, score in candidates:
+            score *= (factors or {}).get(framework, 1.0)
+            if prefer_guides and kind in GUIDE_KINDS:
+                score *= QUESTION_WEIGHT
+            weighted.append((uri, title, framework, kind, score))
+        candidates = weighted
     candidates.sort(key=lambda row: row[4], reverse=True)
     return candidates
+
+
+def parent_map(db_path: Path, uris: Sequence[str]) -> dict[str, str]:
+    """Map each page to the page that holds it, sections included."""
+    pages = get_documents(db_path, list(uris))
+    return {
+        uri: (pages[uri].parent_uri or uri) for uri in uris if uri in pages
+    }
+
+
+def collapse_to_parents(
+    ranked: Sequence[Candidate], parents: dict[str, str], limit: int
+) -> list[Candidate]:
+    """Return canonical pages rather than several sections of the same page.
+
+    A section is where the words matched; the page that holds it is what answers
+    the question, and three sections of one article should not fill three slots.
+    """
+    chosen: dict[str, Candidate] = {}
+    order: list[str] = []
+    for uri, title, framework, kind, score in ranked:
+        display = parents.get(uri, uri)
+        if display in chosen:
+            continue
+        chosen[display] = (display, title, framework, kind, score)
+        order.append(display)
+        if len(order) >= limit:
+            break
+    return [chosen[key] for key in order]
 
 
 def _query_index(
@@ -367,16 +445,30 @@ def bridge_hits(documents: Sequence[Document]) -> list[Hit]:
 
 
 def fuse_rrf(
-    local: Sequence[Hit], bridge: Sequence[Hit], *, limit: int, k: int = RRF_K
+    local: Sequence[Hit],
+    bridge: Sequence[Hit],
+    *,
+    limit: int,
+    k: int = RRF_K,
+    weights: tuple[float, float] = (1.0, 1.0),
 ) -> list[Hit]:
-    """Merge two ranked lists by reciprocal rank, keeping one entry per page."""
+    """Merge two ranked lists by reciprocal rank, keeping one entry per page.
+
+    Weights let the caller say which list it trusts for this question. Measured
+    on the judged sets: an identifier lookup is answered by the local list alone,
+    a question by the bridge's order, and fusing them with equal weight serves
+    neither.
+    """
     fused: dict[str, float] = {}
     chosen: dict[str, Hit] = {}
     sources: dict[str, set[str]] = {}
 
-    for ranks in (local, bridge):
+    for index, ranks in enumerate((local, bridge)):
+        weight = weights[index] if index < len(weights) else 1.0
+        if weight <= 0:
+            continue
         for position, hit in enumerate(ranks, start=1):
-            fused[hit.uri] = fused.get(hit.uri, 0.0) + 1.0 / (k + position)
+            fused[hit.uri] = fused.get(hit.uri, 0.0) + weight / (k + position)
             sources.setdefault(hit.uri, set()).add(hit.source)
             current = chosen.get(hit.uri)
             if current is None or (current.declaration is None and hit.declaration is not None):

@@ -71,6 +71,60 @@ def test_search_reports_a_missing_corpus(tmp_path: Path) -> None:
         search("container", settings=missing)
 
 
+def test_auto_mode_answers_an_api_name_without_touching_the_bridge(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a named API must not need Xcode")
+
+    monkeypatch.setattr("apple_docs_mcp.service.bridge_search", refuse)
+
+    outcome = search("ModelContainer", settings=settings)
+
+    assert outcome.mode == "offline"
+    assert outcome.hits[0].uri == "/documentation/SwiftData/ModelContainer"
+
+
+def test_auto_mode_consults_the_bridge_for_a_question(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def record(query: str, *args: object, **kwargs: object) -> list[Document]:
+        calls.append(query)
+        return [
+            Document(
+                title="ModelContainer",
+                uri="/documentation/SwiftData/ModelContainer",
+                contents="excerpt",
+                score=0.9,
+                kind="symbol",
+            )
+        ]
+
+    monkeypatch.setattr("apple_docs_mcp.service.bridge_search", record)
+
+    outcome = search("how do I create a model container", settings=settings)
+
+    assert calls == ["how do I create a model container"]
+    assert outcome.mode == "hybrid"
+    assert any(hit.source == "hybrid" for hit in outcome.hits)
+
+
+def test_auto_mode_falls_back_to_the_index_when_the_bridge_refuses(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*args: object, **kwargs: object) -> None:
+        raise BridgeTimeoutError("Bridge did not answer within 10s")
+
+    monkeypatch.setattr("apple_docs_mcp.service.bridge_search", explode)
+
+    outcome = search("how do I adopt inheritance", settings=settings)
+
+    assert outcome.hits, "the index must still answer a question"
+    assert outcome.bridge_error is not None
+
+
 def test_hybrid_mode_fuses_the_bridge_into_the_local_ranking(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

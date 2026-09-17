@@ -33,6 +33,7 @@ __all__ = [
     "build_index",
     "default_cache_dir",
     "ensure_index",
+    "framework_sizes",
     "index_info",
     "index_path",
     "open_index",
@@ -42,6 +43,12 @@ INDEX_SCHEMA_VERSION: Final = 2
 
 # FTS5 needs the identifier characters kept inside tokens: ``View.body`` and
 # ``NSApplicationDelegate`` must not be split into pieces.
+#
+# The porter stemmer was tried here and rejected on measurement: it does close
+# the inflection gap ("secret" reaches "secrets"), but it also merges terms into
+# higher document frequencies, so selectivity filtering drops more of the query
+# and both query sets scored worse — identifier recall@3 92.5% -> 90%, question
+# recall@5 75% -> 58%.
 _TOKENIZER: Final = "unicode61 remove_diacritics 2 tokenchars '_.:'"
 
 BUILD_BATCH: Final = 4000
@@ -49,6 +56,9 @@ BUILD_BATCH: Final = 4000
 #: Two callers can reach a cold index at once (a warm-up thread and a first
 #: search). Building writes a fixed temporary file, so only one build may run.
 _BUILD_LOCK: Final = threading.Lock()
+
+_FRAMEWORK_CACHE: Final[dict[tuple[str, int, int], dict[str, int]]] = {}
+_FRAMEWORK_LOCK: Final = threading.Lock()
 
 
 def default_cache_dir() -> Path:
@@ -135,6 +145,31 @@ def index_info(db_path: Path | None, cache_dir: Path) -> IndexInfo | None:
         source_mtime=source_mtime,
         fresh=fresh,
     )
+
+
+def framework_sizes(index_file: Path, connection: sqlite3.Connection) -> dict[str, int]:
+    """Page counts per framework, cached per index file.
+
+    A query that "how do I…" answers needs a prior on which framework a
+    developer means: Foundation and UIKit hold thousands of pages, WalletOrders
+    holds a few, and without that prior a symbol called ``Location`` in an
+    unrelated framework outranks CoreLocation.
+    """
+    stat = index_file.stat()
+    key = (str(index_file), stat.st_size, stat.st_mtime_ns)
+    with _FRAMEWORK_LOCK:
+        cached = _FRAMEWORK_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    rows = connection.execute(
+        "select framework, count(*) from docs group by framework"
+    ).fetchall()
+    sizes = {str(name): int(count) for name, count in rows if str(name)}
+    with _FRAMEWORK_LOCK:
+        _FRAMEWORK_CACHE.clear()
+        _FRAMEWORK_CACHE[key] = sizes
+    return sizes
 
 
 def open_index(path: Path) -> sqlite3.Connection:

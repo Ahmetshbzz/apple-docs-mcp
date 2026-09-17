@@ -28,6 +28,7 @@ from apple_docs_mcp.responses import (
     status_payload,
 )
 from apple_docs_mcp.service import (
+    DEFAULT_MODE,
     Settings,
     build,
     document,
@@ -92,8 +93,14 @@ def create_server(settings: Settings | None = None) -> MCPServer:
         ] = DEFAULT_LIMIT,
         mode: Annotated[
             str,
-            Field(description="offline (default, no Xcode), semantic (Xcode), or hybrid."),
-        ] = "offline",
+            Field(
+                description=(
+                    "auto (default) reads the query: an API name is answered offline, "
+                    "a question also consults Xcode's semantic ranker. Also accepts "
+                    "offline, semantic, hybrid."
+                )
+            ),
+        ] = DEFAULT_MODE,
         include_full_text: Annotated[
             bool, Field(description="Include each hit's full page text, not just a snippet.")
         ] = False,
