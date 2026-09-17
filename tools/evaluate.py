@@ -98,15 +98,21 @@ KS = (1, 3, 5)
 
 @dataclass(frozen=True, slots=True)
 class Score:
-    """Recall at each k, plus timing, for one engine over one query set."""
+    """Recall at each k, timing, and MRR for one engine over one query set."""
 
     engine: str
     queries: int
     recall: dict[int, int]
     latencies: list[float]
+    reciprocal_ranks: list[float]
 
     def rate(self, k: int) -> float:
         return self.recall[k] / self.queries if self.queries else 0.0
+
+    @property
+    def mrr(self) -> float:
+        """Mean reciprocal rank: how near the top the first right answer sits."""
+        return statistics.mean(self.reciprocal_ranks) if self.reciprocal_ranks else 0.0
 
     @property
     def mean_ms(self) -> float:
@@ -202,23 +208,34 @@ def is_relevant(uri: str, acceptable: tuple[str, ...]) -> bool:
     return any(candidate == normalise(entry) for entry in acceptable)
 
 
+def first_relevant_rank(uris: list[str], acceptable: tuple[str, ...]) -> float:
+    """``1/rank`` of the first acceptable page, or 0 when it never appears."""
+    for rank, uri in enumerate(uris, start=1):
+        if is_relevant(uri, acceptable):
+            return 1.0 / rank
+    return 0.0
+
+
 def evaluate_offline(queries: list[tuple[str, tuple[str, ...]]], k: int) -> Score:
     hits = {key: 0 for key in KS}
     latencies: list[float] = []
+    reciprocal_ranks: list[float] = []
     for query, acceptable in queries:
         started = time.perf_counter()
         outcome = search(query, limit=k, mode="offline")
         latencies.append((time.perf_counter() - started) * 1000)
         uris = [hit.uri for hit in outcome.hits]
+        reciprocal_ranks.append(first_relevant_rank(uris, acceptable))
         for key in KS:
             if any(is_relevant(uri, acceptable) for uri in uris[:key]):
                 hits[key] += 1
-    return Score("offline", len(queries), hits, latencies)
+    return Score("offline", len(queries), hits, latencies, reciprocal_ranks)
 
 
 def evaluate_bridge(queries: list[tuple[str, tuple[str, ...]]], k: int) -> Score | None:
     hits = {key: 0 for key in KS}
     latencies: list[float] = []
+    reciprocal_ranks: list[float] = []
     for query, acceptable in queries:
         started = time.perf_counter()
         try:
@@ -228,16 +245,18 @@ def evaluate_bridge(queries: list[tuple[str, tuple[str, ...]]], k: int) -> Score
             return None
         latencies.append((time.perf_counter() - started) * 1000)
         uris = [document.uri for document in documents[:k]]
+        reciprocal_ranks.append(first_relevant_rank(uris, acceptable))
         for key in KS:
             if any(is_relevant(uri, acceptable) for uri in uris[:key]):
                 hits[key] += 1
-    return Score("bridge", len(queries), hits, latencies)
+    return Score("bridge", len(queries), hits, latencies, reciprocal_ranks)
 
 
 def evaluate_mode(name: str, queries: list[tuple[str, tuple[str, ...]]], k: int) -> Score | None:
     """Score one mode: the fused path, or the automatic choice between paths."""
     hits = {key: 0 for key in KS}
     latencies: list[float] = []
+    reciprocal_ranks: list[float] = []
     for query, acceptable in queries:
         started = time.perf_counter()
         try:
@@ -247,21 +266,27 @@ def evaluate_mode(name: str, queries: list[tuple[str, tuple[str, ...]]], k: int)
             return None
         latencies.append((time.perf_counter() - started) * 1000)
         uris = [hit.uri for hit in outcome.hits]
+        reciprocal_ranks.append(first_relevant_rank(uris, acceptable))
         for key in KS:
             if any(is_relevant(uri, acceptable) for uri in uris[:key]):
                 hits[key] += 1
-    return Score(name, len(queries), hits, latencies)
+    return Score(name, len(queries), hits, latencies, reciprocal_ranks)
 
 
 def report(name: str, scores: list[Score]) -> None:
     print(f"\n=== {name} (n={scores[0].queries}) ===")
     header = (
-        f"{'engine':10} " + " ".join(f"@{k:<7}" for k in KS) + f"{'mean ms':>10}{'median ms':>11}"
+        f"{'engine':10} "
+        + " ".join(f"@{k:<7}" for k in KS)
+        + f"{'MRR':>7}{'mean ms':>10}{'median ms':>11}"
     )
     print(header)
     for score in scores:
         cells = " ".join(f"{score.rate(k) * 100:6.1f}%" for k in KS)
-        print(f"{score.engine:10} {cells} {score.mean_ms:9.1f} {score.median_ms:10.1f}")
+        print(
+            f"{score.engine:10} {cells} {score.mrr:6.3f} "
+            f"{score.mean_ms:9.1f} {score.median_ms:10.1f}"
+        )
 
 
 def pool(queries: list[tuple[str, tuple[str, ...]]], db_path: Path, k: int = 5) -> None:

@@ -46,21 +46,27 @@ Six queries and an opinion is not evidence, so ranking is measured on two sets �
 
 Recall, with `@k` meaning the expected page is in the first k results:
 
-| Identifier, bare title (n=40) | @1 | @3 | @5 | mean latency |
-|---|---|---|---|---|
-| this server, `offline` and `auto` | **87.5%** | **92.5%** | **92.5%** | 1.3–2.8 ms |
-| Xcode `DocumentationSearch` | 57.5% | 65.0% | 67.5% | 333 ms |
+| Identifier, bare title (n=40) | @1 | @3 | @5 | MRR | mean latency |
+|---|---|---|---|---|---|
+| this server, `offline` and `auto` | **87.5%** | **92.5%** | **92.5%** | **0.900** | 1.4–5.7 ms |
+| Xcode `DocumentationSearch` | 57.5% | 65.0% | 67.5% | 0.615 | 294 ms |
 
-| Identifier inside a sentence (n=40) | @1 | @3 | @5 | mean latency |
-|---|---|---|---|---|
-| this server, `offline` and `auto` | **90.0%** | **92.5%** | **92.5%** | 4.4–28 ms |
-| Xcode `DocumentationSearch` | 35.0% | 45.0% | 47.5% | 328 ms |
+| Identifier inside a sentence (n=40) | @1 | @3 | @5 | MRR | mean latency |
+|---|---|---|---|---|---|
+| this server, `offline` and `auto` | **90.0%** | **92.5%** | **92.5%** | **0.912** | 5–28 ms |
+| Xcode `DocumentationSearch` | 35.0% | 45.0% | 47.5% | 0.402 | 353 ms |
 
-| Questions (n=12) | @1 | @3 | @5 | mean latency |
-|---|---|---|---|---|
-| this server, `offline` | 41.7% | 66.7% | 75.0% | 15 ms |
-| this server, `auto` | 41.7% | **83.3%** | **91.7%** | 305 ms |
-| Xcode `DocumentationSearch` | 41.7% | 83.3% | 91.7% | 310 ms |
+| Questions (n=12) | @1 | @3 | @5 | MRR | mean latency |
+|---|---|---|---|---|---|
+| this server, `offline` | 41.7% | 66.7% | 75.0% | 0.544 | 15 ms |
+| this server, `auto` | 41.7% | **83.3%** | **91.7%** | 0.600 | 282 ms |
+| Xcode `DocumentationSearch` | 41.7% | 83.3% | 91.7% | 0.614 | 319 ms |
+
+One trade-off is measured rather than hidden: in `hybrid`, weighting the local
+list equally with the bridge raises recall@1 from 41.7% to 58.3% and lowers
+recall@5 from 91.7% to 75.0% (MRR 0.646 against 0.600). Bridge-weighted is kept
+because the reported metric is recall and because an agent that reads three
+results cares more about the answer being inside them.
 
 The script also audits its own ground truth, because the person who wrote the
 questions also judged the pooled answers. Where the accepted pages came from:
@@ -72,9 +78,9 @@ blind spot of pooling and it flatters both engines equally.
 Read that honestly, because it cuts both ways:
 
 * **For a named API — the lookup an agent makes constantly — this server is
-  clearly better and about 100x faster, with no approval dialog.** The bridge
-  scored 65% at @3 on bare names and 45% when the name arrived inside a sentence;
-  the local index scored 92.5% on both.
+  clearly better and 50–100x faster, with no approval dialog.** The bridge scored
+  65% at @3 on bare names and 45% when the name arrived inside a sentence; the
+  local index scored 92.5% on both.
 * **For a question, the bridge is better than `/offline`** (91.7% vs 75.0% at
   @5). Semantic search reaches wording that no term index has seen, and this
   project does not reproduce Apple's embedding space (measured cosine ≈ 0.01–0.03

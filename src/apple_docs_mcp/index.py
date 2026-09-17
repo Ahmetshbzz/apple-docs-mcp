@@ -39,7 +39,10 @@ __all__ = [
     "open_index",
 ]
 
-INDEX_SCHEMA_VERSION: Final = 2
+#: 3 adds the ``parent`` column, so collapsing a section onto the page that
+#: holds it needs no corpus read at all — that read was 60 random pages of a
+#: 1.2 GB file per query, which cost more than the search itself.
+INDEX_SCHEMA_VERSION: Final = 3
 
 # FTS5 needs the identifier characters kept inside tokens: ``View.body`` and
 # ``NSApplicationDelegate`` must not be split into pieces.
@@ -208,7 +211,8 @@ def build_index(db_path: Path, cache_dir: Path) -> IndexInfo:
                 uri text not null,
                 title text not null,
                 framework text not null,
-                kind text not null
+                kind text not null,
+                parent text not null
             );
             create virtual table docs_fts using fts5(
                 uri, title, framework, content,
@@ -224,7 +228,7 @@ def build_index(db_path: Path, cache_dir: Path) -> IndexInfo:
             """
         )
 
-        batch: list[tuple[int, str, str, str, str, str]] = []
+        batch: list[tuple[int, str, str, str, str, str, str]] = []
         next_id = 1
         for page in _iter_pages(db_path):
             batch.append((next_id, *page))
@@ -283,11 +287,11 @@ def _remove_stale_indexes(current: Path) -> None:
 
 
 def _insert_batch(
-    derived: sqlite3.Connection, batch: list[tuple[int, str, str, str, str, str]]
+    derived: sqlite3.Connection, batch: list[tuple[int, str, str, str, str, str, str]]
 ) -> None:
     derived.executemany(
-        "insert into docs values (?, ?, ?, ?, ?)",
-        [(row[0], row[1], row[2], row[3], row[4]) for row in batch],
+        "insert into docs values (?, ?, ?, ?, ?, ?)",
+        [(row[0], row[1], row[2], row[3], row[4], row[6]) for row in batch],
     )
     derived.executemany(
         "insert into docs_fts(rowid, uri, title, framework, content) values (?, ?, ?, ?, ?)",
@@ -295,8 +299,8 @@ def _insert_batch(
     )
 
 
-def _iter_pages(db_path: Path) -> Iterator[tuple[str, str, str, str, str]]:
-    """Stream ``(uri, title, framework, kind, content)`` for every page."""
+def _iter_pages(db_path: Path) -> Iterator[tuple[str, str, str, str, str, str]]:
+    """Stream ``(uri, title, framework, kind, content, parent)`` for every page."""
     connection = connect(db_path)
     try:
         cursor = connection.execute(
@@ -305,7 +309,8 @@ def _iter_pages(db_path: Path) -> Iterator[tuple[str, str, str, str, str]]:
                    coalesce(json_extract(document,'$.title'), ''),
                    coalesce(json_extract(document,'$.framework'), ''),
                    coalesce(json_extract(document,'$.kind'), ''),
-                   coalesce(json_extract(document,'$.content'), '')
+                   coalesce(json_extract(document,'$.content'), ''),
+                   coalesce(json_extract(document,'$.parentUri'), '')
             from documents
             where asset_id is not null
             """
@@ -319,6 +324,7 @@ def _iter_pages(db_path: Path) -> Iterator[tuple[str, str, str, str, str]]:
                 str(row[2] or ""),
                 str(row[3] or ""),
                 str(row[4] or ""),
+                str(row[5] or ""),
             )
     finally:
         connection.close()

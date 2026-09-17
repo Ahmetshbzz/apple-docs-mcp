@@ -32,7 +32,7 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, NamedTuple
 
 from apple_docs_mcp.bridge import Document
 from apple_docs_mcp.connections import shared
@@ -101,7 +101,19 @@ QUESTION_PATTERN: Final = re.compile(
 )
 GUIDE_KINDS: Final = frozenset({"article", "tutorial"})
 
-Candidate = tuple[str, str, str, str, float]
+class Candidate(NamedTuple):
+    """One ranked page, before it becomes a :class:`Hit`.
+
+    ``parent`` comes from the index, not from the corpus: fetching it per query
+    meant reading 60 random pages of a 1.2 GB file to collapse sections.
+    """
+
+    uri: str
+    title: str
+    framework: str
+    kind: str
+    score: float
+    parent: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,10 +257,10 @@ def _boost(candidates: list[Candidate], identifier: str | None) -> list[Candidat
 
     needle = identifier.lower()
     boosted: list[Candidate] = []
-    for uri, title, framework, kind, score in candidates:
-        if needle in uri.lower() or needle in title.lower():
-            score *= BOOST_FACTOR
-        boosted.append((uri, title, framework, kind, score))
+    for candidate in candidates:
+        if needle in candidate.uri.lower() or needle in candidate.title.lower():
+            candidate = candidate._replace(score=candidate.score * BOOST_FACTOR)
+        boosted.append(candidate)
     return boosted
 
 
@@ -293,30 +305,23 @@ def search_offline(
         factors=authority_factors(sizes) if question else {},
         prefer_guides=question,
     )
-    # One fetch serves both jobs: collapsing sections onto the page that holds
-    # them, and the snippets of what is finally returned.
-    pool_pages = get_documents(db_path, [row[0] for row in ranked])
-    candidates = collapse_to_parents(
-        ranked,
-        {uri: (pool_pages[uri].parent_uri or uri) for uri in pool_pages},
-        limit,
-    )
+    candidates = collapse_to_parents(ranked, limit)
     if not candidates:
         return []
 
-    pages = {**pool_pages, **get_documents(db_path, [uri for uri, *_ in candidates])}
+    pages = get_documents(db_path, [candidate.uri for candidate in candidates])
 
     hits: list[Hit] = []
-    for uri, title, framework, kind, score in candidates:
-        page = pages.get(uri)
+    for candidate in candidates:
+        page = pages.get(candidate.uri)
         content = page.content if page is not None else ""
         hits.append(
             Hit(
-                uri=uri,
-                title=page.title if page is not None else title,
-                framework=page.framework if page is not None else framework,
-                kind=page.kind if page is not None else kind,
-                score=round(score, 4),
+                uri=candidate.uri,
+                title=page.title if page is not None else candidate.title,
+                framework=page.framework if page is not None else candidate.framework,
+                kind=page.kind if page is not None else candidate.kind,
+                score=round(candidate.score, 4),
                 declaration=page.declaration if page is not None else None,
                 availability=page.availability if page is not None else [],
                 snippet=make_snippet(content, terms, width=snippet_width),
@@ -399,27 +404,17 @@ def _rank(
     )
     if factors or prefer_guides:
         weighted: list[Candidate] = []
-        for uri, title, framework, kind, score in candidates:
-            score *= (factors or {}).get(framework, 1.0)
-            if prefer_guides and kind in GUIDE_KINDS:
+        for candidate in candidates:
+            score = candidate.score * (factors or {}).get(candidate.framework, 1.0)
+            if prefer_guides and candidate.kind in GUIDE_KINDS:
                 score *= QUESTION_WEIGHT
-            weighted.append((uri, title, framework, kind, score))
+            weighted.append(candidate._replace(score=score))
         candidates = weighted
-    candidates.sort(key=lambda row: row[4], reverse=True)
+    candidates.sort(key=lambda candidate: candidate.score, reverse=True)
     return candidates
 
 
-def parent_map(db_path: Path, uris: Sequence[str]) -> dict[str, str]:
-    """Map each page to the page that holds it, sections included."""
-    pages = get_documents(db_path, list(uris))
-    return {
-        uri: (pages[uri].parent_uri or uri) for uri in uris if uri in pages
-    }
-
-
-def collapse_to_parents(
-    ranked: Sequence[Candidate], parents: dict[str, str], limit: int
-) -> list[Candidate]:
+def collapse_to_parents(ranked: Sequence[Candidate], limit: int) -> list[Candidate]:
     """Return canonical pages rather than several sections of the same page.
 
     A section is where the words matched; the page that holds it is what answers
@@ -427,11 +422,13 @@ def collapse_to_parents(
     """
     chosen: dict[str, Candidate] = {}
     order: list[str] = []
-    for uri, title, framework, kind, score in ranked:
-        display = parents.get(uri, uri)
+    for candidate in ranked:
+        display = candidate.parent or candidate.uri
         if display in chosen:
             continue
-        chosen[display] = (display, title, framework, kind, score)
+        if display != candidate.uri:
+            candidate = candidate._replace(uri=display, parent="")
+        chosen[display] = candidate
         order.append(display)
         if len(order) >= limit:
             break
@@ -459,7 +456,7 @@ def _query_index(
     connection = shared(index_file, open_index)
     rows = connection.execute(
         f"""
-        select d.uri, d.title, d.framework, d.kind,
+        select d.uri, d.title, d.framework, d.kind, d.parent,
                bm25(docs_fts, {_BM25_ARGUMENTS}) as rank
         from docs_fts join docs d on d.id = docs_fts.rowid
         where {' and '.join(clauses)}
@@ -471,8 +468,8 @@ def _query_index(
 
     # bm25() returns lower-is-better negative values; flip so higher is better.
     return [
-        (str(uri), str(title), str(framework), str(kind), -float(rank))
-        for uri, title, framework, kind, rank in rows
+        Candidate(str(uri), str(title), str(framework), str(kind), -float(rank), str(parent))
+        for uri, title, framework, kind, parent, rank in rows
     ]
 
 
