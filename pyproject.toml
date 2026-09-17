@@ -1,7 +1,7 @@
 [project]
 name = "apple-docs-mcp"
 version = "0.1.0"
-description = "MCP server and CLI for offline Apple Developer Documentation via Xcode's local documentation index"
+description = "MCP server and CLI for offline Apple Developer Documentation, served from the corpus Xcode already has on disk"
 license = "MIT"
 authors = [{ name = "Ahmet Şahbazoğlu" }]
 requires-python = ">=3.12"

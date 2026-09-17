@@ -12,11 +12,12 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
 __all__ = [
-    "BRIDGE_PATH",
+    "BRIDGE_COMMAND",
     "BridgeError",
     "BridgeProtocolError",
     "BridgeTimeoutError",
@@ -28,7 +29,10 @@ __all__ = [
     "search_docs",
 ]
 
-BRIDGE_PATH: Final = "/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge"
+#: Launch the bridge through ``xcrun`` so the Xcode that ``xcode-select`` points
+#: at answers — a hardcoded path would silently keep using the release Xcode on a
+#: machine that selected a beta or moved its Xcode.
+BRIDGE_COMMAND: Final = ("/usr/bin/xcrun", "mcpbridge")
 
 DEFAULT_TIMEOUT_SECONDS: Final = 30.0
 INITIALIZE_TIMEOUT_SECONDS: Final = 10.0
@@ -147,12 +151,12 @@ def parse_search_result(frame: dict[str, Any]) -> list[Document]:
 class _BridgeSession:
     """A live ``mcpbridge`` subprocess speaking newline-delimited JSON-RPC."""
 
-    def __init__(self, bridge_path: str, timeout: float) -> None:
+    def __init__(self, command: Sequence[str], timeout: float) -> None:
         self._timeout = timeout
         self._stderr_lines: list[str] = []
         try:
             self._process = subprocess.Popen(
-                [bridge_path],
+                list(command),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -209,7 +213,7 @@ def search_docs(
     query: str,
     frameworks: list[str] | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
-    bridge_path: str | None = None,
+    command: Sequence[str] | None = None,
 ) -> list[Document]:
     """Search the local Apple Developer Documentation index.
 
@@ -219,13 +223,14 @@ def search_docs(
     if not query.strip():
         raise ValueError("query must not be empty")
 
-    path = bridge_path or BRIDGE_PATH
-    if not shutil.which(path) and not __import__("os").path.exists(path):
+    resolved = tuple(command) if command else BRIDGE_COMMAND
+    if not shutil.which(resolved[0]):
         raise XcodeUnavailableError(
-            f"Xcode's MCP bridge was not found at {path}. Install Xcode or run `xcode-select`."
+            f"Could not run {' '.join(resolved)}: the launcher was not found. "
+            "Install Xcode or fix `xcode-select`."
         )
 
-    session = _BridgeSession(path, timeout)
+    session = _BridgeSession(resolved, timeout)
     try:
         session.send(
             {

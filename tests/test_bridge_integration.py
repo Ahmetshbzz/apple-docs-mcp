@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from apple_docs_mcp.bridge import (
-    BRIDGE_PATH,
+    BRIDGE_COMMAND,
     NotApprovedError,
     XcodeUnavailableError,
     search_docs,
@@ -20,9 +20,9 @@ pytestmark = pytest.mark.integration
 
 
 def _bridge_present() -> bool:
-    import os
+    import shutil
 
-    return os.path.exists(BRIDGE_PATH)
+    return shutil.which(BRIDGE_COMMAND[0]) is not None
 
 
 @pytest.mark.skipif(not _bridge_present(), reason="Xcode's MCP bridge is not installed")
