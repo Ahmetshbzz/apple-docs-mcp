@@ -36,39 +36,54 @@ running MCP server that warmed itself at startup.
 Six queries and an opinion is not evidence, so ranking is measured on two sets —
 `uv run python tools/evaluate.py`, ground truth stated per query:
 
-* **40 identifier queries**, sampled from the corpus. The query is a symbol
-  page's own title, the expected answer is that page, and no judgement is
-  involved: "does the engine find the API it was named after".
+* **40 identifier queries**, sampled from the corpus, asked twice: as the bare
+  title, and inside a sentence the way a person types it ("I want to use ARAnchor
+  in my app, how does it work"). The expected answer is the page's URI and no
+  judgement is involved.
 * **12 questions** ("how do I download a file and show progress"). Answers were
   judged from the *pooled* results of both engines, so an equally good page is
   not marked wrong for not being the one the question writer had in mind.
 
 Recall, with `@k` meaning the expected page is in the first k results:
 
-| Identifier queries (n=40) | @1 | @3 | @5 | mean latency |
+| Identifier, bare title (n=40) | @1 | @3 | @5 | mean latency |
 |---|---|---|---|---|
-| this server, `offline` | **87.5%** | **92.5%** | **92.5%** | 1.9 ms |
-| this server, `auto` (default) | **87.5%** | **92.5%** | **92.5%** | 1.5 ms |
-| Xcode `DocumentationSearch` | 57.5% | 65.0% | 67.5% | 329 ms |
+| this server, `offline` and `auto` | **87.5%** | **92.5%** | **92.5%** | 1.3–2.8 ms |
+| Xcode `DocumentationSearch` | 57.5% | 65.0% | 67.5% | 333 ms |
 
-| Question queries (n=12) | @1 | @3 | @5 | mean latency |
+| Identifier inside a sentence (n=40) | @1 | @3 | @5 | mean latency |
 |---|---|---|---|---|
-| this server, `offline` | 41.7% | 66.7% | 75.0% | 27.7 ms |
-| this server, `auto` | 41.7% | **83.3%** | **91.7%** | 296 ms |
-| Xcode `DocumentationSearch` | 41.7% | 83.3% | 91.7% | 325 ms |
+| this server, `offline` and `auto` | **90.0%** | **92.5%** | **92.5%** | 4.4–28 ms |
+| Xcode `DocumentationSearch` | 35.0% | 45.0% | 47.5% | 328 ms |
+
+| Questions (n=12) | @1 | @3 | @5 | mean latency |
+|---|---|---|---|---|
+| this server, `offline` | 41.7% | 66.7% | 75.0% | 15 ms |
+| this server, `auto` | 41.7% | **83.3%** | **91.7%** | 305 ms |
+| Xcode `DocumentationSearch` | 41.7% | 83.3% | 91.7% | 310 ms |
+
+The script also audits its own ground truth, because the person who wrote the
+questions also judged the pooled answers. Where the accepted pages came from:
+9 found by both engines, **13 only by the bridge's pool, 4 only by this server's**
+— the labelling leans toward the bridge, not toward this project. A further 12
+accepted pages were returned by neither engine; nobody judged those, which is the
+blind spot of pooling and it flatters both engines equally.
 
 Read that honestly, because it cuts both ways:
 
 * **For a named API — the lookup an agent makes constantly — this server is
-  clearly better and about 200x faster, with no approval dialog.** The bridge
-  scored 65% at @3; the local index scored 92.5%.
+  clearly better and about 100x faster, with no approval dialog.** The bridge
+  scored 65% at @3 on bare names and 45% when the name arrived inside a sentence;
+  the local index scored 92.5% on both.
 * **For a question, the bridge is better than `/offline`** (91.7% vs 75.0% at
   @5). Semantic search reaches wording that no term index has seen, and this
   project does not reproduce Apple's embedding space (measured cosine ≈ 0.01–0.03
   for the very same page text), so it does not pretend to.
-* **`auto` — the default — is never worse than the better engine on either
-  set**, because it reads the query and picks. It answers names locally in about
-  a millisecond and asks the bridge only for questions.
+* **`auto` — the default — is never worse than the better engine on any of the
+  three sets**, because it reads the query and picks. A query that names an API
+  is answered locally in about a millisecond; a question that names no API gets
+  the bridge's semantic order fused in. A framework name is not an API name: it
+  scopes a question rather than being one.
 
 The bridge's own weakness is visible in the data as well: **39 of the 118
 documents it returned across an earlier six-query run were under 100

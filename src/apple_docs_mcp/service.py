@@ -28,19 +28,21 @@ from apple_docs_mcp.bridge import (
 from apple_docs_mcp.bridge import (
     search_docs as bridge_search,
 )
+from apple_docs_mcp.connections import shared
 from apple_docs_mcp.corpus import DocumentationDBMissingError, DocumentRecord
 from apple_docs_mcp.index import (
     IndexInfo,
     default_cache_dir,
     ensure_index,
     index_info,
+    open_index,
 )
 from apple_docs_mcp.search import (
     Hit,
+    bridge_helps,
     bridge_hits,
     enrich_from_corpus,
     fuse_rrf,
-    looks_like_question,
     search_offline,
 )
 from apple_docs_mcp.skill import Playbook, load_playbook, read_reference
@@ -68,9 +70,10 @@ DEFAULT_MODE: Final = "auto"
 #: the one that understands wording; the local list is the one that knows names.
 FUSION_WEIGHTS: Final = (1.0, 2.0)
 
-#: Auto mode may reach for the bridge; it must not sit on an unapproved one for
-#: the full search budget before falling back to the local index.
+#: A fused or automatic search may reach for the bridge; it must not sit on an
+#: unapproved one for the full search budget before falling back to the index.
 AUTO_BRIDGE_TIMEOUT_SECONDS: Final = 10.0
+DEFAULT_BRIDGE_TIMEOUT_SECONDS: Final = 30.0
 BRIDGE_CANDIDATES: Final = 20
 PREWARM_QUERY: Final = "SwiftUI View"
 PREWARM_LIMIT: Final = 3
@@ -155,13 +158,28 @@ def _ready(settings: Settings, *, force: bool = False) -> tuple[Path, IndexInfo]
 
 
 def _bridge_documents(
-    query: str, frameworks: list[str] | None, settings: Settings, timeout: float | None = None
+    query: str,
+    frameworks: list[str] | None,
+    settings: Settings,
+    timeout: float = DEFAULT_BRIDGE_TIMEOUT_SECONDS,
 ) -> list[Document]:
-    if timeout is None:
-        return bridge_search(query, frameworks, command=settings.bridge_command)
     return bridge_search(
         query, frameworks, timeout=timeout, command=settings.bridge_command
     )
+
+
+def _semantic_outcome(bridge: list[Hit], limit: int, settings: Settings) -> SearchOutcome:
+    """Answer from the bridge alone, completing each hit from the corpus."""
+    db_path = _corpus_path(settings)
+    if db_path is not None and bridge:
+        bridge = enrich_from_corpus(db_path, bridge)
+    return SearchOutcome(hits=bridge[:limit], mode="semantic", index=None)
+
+
+def _bridge_helps(query: str, index_file: Path) -> bool:
+    """Whether the query should also consult Xcode's semantic ranker."""
+    connection = shared(index_file, open_index)
+    return bridge_helps(query, index_file, connection)
 
 
 def search(
@@ -184,41 +202,26 @@ def search(
     resolved = _settings(settings)
     bridge_error: str | None = None
     bridge: list[Hit] = []
-    index_state: IndexInfo | None = None
 
-    # "auto" reads the query: a caller naming an API is served by the local index
-    # alone, which is both faster and measurably more accurate for names; a caller
-    # asking a question gets the bridge's semantic order fused in. Judged on 40
-    # identifier queries and 12 questions, that choice is the best measured
-    # configuration on both sets.
-    auto = mode == "auto"
-    if auto:
-        mode = "hybrid" if looks_like_question(query) else "offline"
+    if mode == "semantic":
+        bridge = bridge_hits(_bridge_documents(query, frameworks, resolved))
+        return _semantic_outcome(bridge, limit, resolved)
 
-    if mode in ("semantic", "hybrid"):
+    # The local index answers first, and for "auto" it also decides the route: a
+    # query that names an API is served locally (measured 92.5% recall@3 against
+    # the bridge's 47.5% once the name arrives inside a sentence), a question
+    # without a name gets the semantic order fused in (91.7% @5 against 75.0%).
+    db_path, index_state = _ready(resolved)
+    if mode == "auto":
+        mode = "hybrid" if _bridge_helps(query, index_state.path) else "offline"
+
+    if mode == "hybrid":
         try:
             bridge = bridge_hits(
-                _bridge_documents(
-                    query,
-                    frameworks,
-                    resolved,
-                    AUTO_BRIDGE_TIMEOUT_SECONDS if auto else None,
-                )
+                _bridge_documents(query, frameworks, resolved, AUTO_BRIDGE_TIMEOUT_SECONDS)
             )
         except BridgeError as error:
-            if mode == "semantic":
-                raise
             bridge_error = str(error).splitlines()[0]
-
-    if mode == "semantic" and bridge:
-        db_path = _corpus_path(resolved)
-        if db_path is not None:
-            bridge = enrich_from_corpus(db_path, bridge)
-        return SearchOutcome(hits=bridge[:limit], mode=mode, index=index_state)
-    if mode == "semantic" and not bridge:
-        return SearchOutcome(hits=[], mode=mode, index=index_state, bridge_error=bridge_error)
-
-    db_path, index_state = _ready(resolved)
     local = search_offline(
         db_path,
         index_state.path,

@@ -117,8 +117,53 @@ class Score:
         return statistics.median(self.latencies) if self.latencies else 0.0
 
 
-def identifier_queries(limit: int) -> list[tuple[str, tuple[str, ...]]]:
-    """Sample symbol pages and ask for each one by its own title."""
+def audit_ground_truth(
+    queries: list[tuple[str, tuple[str, ...]]], k: int = 5
+) -> None:
+    """Check the judged sets for writer bias.
+
+    The questions were written by the same person judging the pooled results, so
+    the acceptable sets could quietly favour one engine. This prints where each
+    accepted page actually came from: our pool, the bridge's, or both.
+    """
+    from apple_docs_mcp.bridge import search_docs as call_bridge
+
+    ours_only = theirs_only = shared = unreachable = 0
+    for query, acceptable in queries:
+        mine = {normalise(hit.uri) for hit in search(query, limit=k, mode="offline").hits}
+        try:
+            theirs = {normalise(document.uri) for document in call_bridge(query)[:k]}
+        except BridgeError:
+            theirs = set()
+        for entry in acceptable:
+            wanted = normalise(entry)
+            in_mine, in_theirs = wanted in mine, wanted in theirs
+            if in_mine and in_theirs:
+                shared += 1
+            elif in_mine:
+                ours_only += 1
+            elif in_theirs:
+                theirs_only += 1
+            else:
+                unreachable += 1
+
+    print("\n=== ground-truth audit ===")
+    print(f"accepted pages found by both engines : {shared}")
+    print(f"accepted pages only our pool returned: {ours_only}")
+    print(f"accepted pages only the bridge returned: {theirs_only}")
+    print(f"accepted pages neither engine returned: {unreachable}")
+    print(
+        "  (the last row is the pooling blind spot: a page nobody returned was "
+        "never judged, so both engines look better than they are)"
+    )
+
+
+def identifier_queries(limit: int, *, wrap: bool = False) -> list[tuple[str, tuple[str, ...]]]:
+    """Sample symbol pages and ask for each one by its own title.
+
+    With ``wrap``, the name arrives inside a sentence the way a person would type
+    it, which is a harder and fairer test than the bare title.
+    """
     db_path = find_documentation_db()
     if db_path is None:
         raise SystemExit("the documentation corpus is not installed")
@@ -139,6 +184,11 @@ def identifier_queries(limit: int) -> list[tuple[str, tuple[str, ...]]]:
         raise SystemExit("no symbol pages to sample")
     stride = max(total // limit, 1)
     sampled = rows[::stride][:limit]
+    if wrap:
+        return [
+            (f"I want to use {title} in my app, how does it work", (str(uri),))
+            for uri, title in sampled
+        ]
     return [(str(title), (str(uri),)) for uri, title in sampled]
 
 
@@ -270,7 +320,14 @@ def main() -> int:
     natural = validate_natural_language(db_path)
     print(f"natural-language queries: {len(natural)}")
 
-    for name, queries in (("identifier", identifiers), ("natural language", natural)):
+    audit_ground_truth(natural)
+
+    sets = [
+        ("identifier (bare title)", identifiers),
+        ("identifier (in a sentence)", identifier_queries(arguments.identifier, wrap=True)),
+        ("natural language", natural),
+    ]
+    for name, queries in sets:
         scores = [evaluate_offline(queries, 5)]
         bridge = evaluate_bridge(queries, 5)
         if bridge is not None:

@@ -111,6 +111,21 @@ def test_auto_mode_consults_the_bridge_for_a_question(
     assert any(hit.source == "hybrid" for hit in outcome.hits)
 
 
+def test_auto_mode_answers_a_question_that_names_an_api_locally(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A name in the sentence outranks the question wording: the bridge was worse."""
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a named API must not need Xcode")
+
+    monkeypatch.setattr("apple_docs_mcp.service.bridge_search", refuse)
+
+    outcome = search("I want to use ModelContainer in my app, how does it work", settings=settings)
+
+    assert outcome.mode == "offline"
+    assert outcome.hits[0].uri == "/documentation/SwiftData/ModelContainer"
+
+
 def test_auto_mode_falls_back_to_the_index_when_the_bridge_refuses(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

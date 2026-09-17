@@ -6,6 +6,12 @@ must still be scored. Terms that name a framework or an API are kept whatever
 their frequency, because that is how a caller scopes a question. Measured effect
 of that selection alone: the same six queries went from 10–121 ms to 1–22 ms.
 
+Three priors then act, and only on a question that does not name an API — a
+named API is its own answer: framework size, a preference for guide pages over
+symbol pages, and collapsing a section onto the page that holds it. Turning the
+priors off for name-bearing queries moved that set from 70% to 90% recall@1.
+What was tried and rejected on measurement is noted where it was tried.
+
 Ranking is bm25 with column weights biased toward the URI and title, which is
 what makes an exact API name beat a passing mention. Xcode's bridge, when it is
 available and approved, adds its own semantic order; :func:`fuse_rrf` combines
@@ -41,9 +47,11 @@ __all__ = [
     "build_match_query",
     "enrich_from_corpus",
     "fuse_rrf",
+    "bridge_helps",
     "identifier_in",
     "make_snippet",
     "named_terms",
+    "names_an_api",
     "search_offline",
     "select_terms",
     "term_document_frequencies",
@@ -269,9 +277,12 @@ def search_offline(
         total_documents,
         mandatory=named_terms(terms),
     )
-    # Priors act only on questions. When a caller names an API, the name match is
-    # the answer and a framework's size has no business outranking it.
-    question = looks_like_question(query)
+    # Priors act only on questions that do not name an API. "I want to use
+    # ARAnchor in my app, how does it work" is a question by shape, but the name
+    # is the answer: with the priors on, that set measured 70% recall@1 instead
+    # of 77.5%.
+    sizes = framework_sizes(index_file, connection)
+    question = looks_like_question(query) and not names_an_api(query, sizes)
     ranked = _rank(
         index_file,
         build_match_query(query, selected),
@@ -279,17 +290,21 @@ def search_offline(
         kinds=kinds,
         limit=limit * CANDIDATE_MULTIPLIER,
         identifier=identifier_in(query),
-        factors=authority_factors(framework_sizes(index_file, connection)) if question else {},
+        factors=authority_factors(sizes) if question else {},
         prefer_guides=question,
     )
+    # One fetch serves both jobs: collapsing sections onto the page that holds
+    # them, and the snippets of what is finally returned.
+    pool_pages = get_documents(db_path, [row[0] for row in ranked])
     candidates = collapse_to_parents(
-        ranked, parent_map(db_path, [row[0] for row in ranked]), limit
+        ranked,
+        {uri: (pool_pages[uri].parent_uri or uri) for uri in pool_pages},
+        limit,
     )
     if not candidates:
         return []
 
-    pages = get_documents(db_path, [uri for uri, *_ in candidates])
-    terms = tokenize_query(query)
+    pages = {**pool_pages, **get_documents(db_path, [uri for uri, *_ in candidates])}
 
     hits: list[Hit] = []
     for uri, title, framework, kind, score in candidates:
@@ -314,6 +329,41 @@ def search_offline(
 def looks_like_question(query: str) -> bool:
     """Whether the caller asked a question rather than named an API."""
     return QUESTION_PATTERN.search(query) is not None
+
+
+def looks_like_identifier(term: str) -> bool:
+    """Whether a single token is shaped like an API name.
+
+    ``ARAnchor``, ``FFT_RADIX5``, ``AVAudioSession.Category`` and
+    ``download(from:)`` are names; ``Metal`` and ``SwiftUI`` are frameworks,
+    which is a different thing and is filtered by the caller.
+    """
+    if "." in term or "_" in term or ":" in term:
+        return True
+    if len(term) >= 3 and term.isupper() and term.isalpha():
+        return True
+    return any(character.isupper() for character in term[1:])
+
+
+def names_an_api(query: str, frameworks: Sequence[str] | dict[str, int]) -> bool:
+    """Whether the query names an API, as opposed to a framework or a topic.
+
+    Measured why this matters: "how does ARAnchor work" is answered best by the
+    local index (92.5% recall@3) and phrased questions without a name by the
+    bridge (91.7% at @5). A framework name is neither — it scopes a question.
+    """
+    known = {name.lower() for name in frameworks}
+    return any(
+        term.lower() not in known and looks_like_identifier(term)
+        for term in tokenize_query(query)
+    )
+
+
+def bridge_helps(query: str, index_file: Path, connection: sqlite3.Connection) -> bool:
+    """Whether this query should consult Xcode's semantic ranker."""
+    if not looks_like_question(query):
+        return False
+    return not names_an_api(query, framework_sizes(index_file, connection))
 
 
 def authority_factors(sizes: dict[str, int]) -> dict[str, float]:

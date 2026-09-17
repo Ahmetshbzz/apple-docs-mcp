@@ -107,6 +107,41 @@ def test_search_offline_still_answers_when_no_page_carries_every_term(
     }
 
 
+def test_looks_like_identifier_recognises_api_name_shapes() -> None:
+    from apple_docs_mcp.search import looks_like_identifier
+
+    assert looks_like_identifier("ARAnchor")
+    assert looks_like_identifier("FFT_RADIX5")
+    assert looks_like_identifier("AVAudioSession.Category")
+    assert looks_like_identifier("download(from:delegate:)")
+    assert not looks_like_identifier("download")
+    assert not looks_like_identifier("view")
+
+
+def test_names_an_api_ignores_framework_names(indexed_asset: tuple[Path, Path]) -> None:
+    from apple_docs_mcp.search import names_an_api
+
+    frameworks = ["SwiftUI", "Metal", "SwiftData"]
+
+    assert names_an_api("I want to use ARAnchor in my app", frameworks)
+    assert not names_an_api("how do I observe changes in a SwiftUI view model", frameworks)
+    assert not names_an_api("how do I add inheritance to my SwiftData model", frameworks)
+
+
+def test_bridge_helps_only_for_a_question_without_a_name(
+    indexed_asset: tuple[Path, Path],
+) -> None:
+    from apple_docs_mcp.index import open_index
+    from apple_docs_mcp.search import bridge_helps
+
+    _, index_file = indexed_asset
+    connection = shared(index_file, open_index)
+
+    assert bridge_helps("how do I add inheritance", index_file, connection) is True
+    assert bridge_helps("I want to use ModelContainer in my app", index_file, connection) is False
+    assert bridge_helps("ModelContainer", index_file, connection) is False
+
+
 def test_identifier_in_finds_dotted_and_camel_case_names() -> None:
     assert identifier_in("how does AVAudioSession.Category work") == "AVAudioSession.Category"
     assert identifier_in("where is ModelContainer defined") == "ModelContainer"
