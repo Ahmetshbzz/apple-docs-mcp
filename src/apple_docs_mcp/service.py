@@ -47,6 +47,7 @@ __all__ = [
     "document",
     "frameworks",
     "playbook",
+    "prewarm",
     "reference",
     "search",
     "status",
@@ -55,6 +56,8 @@ __all__ = [
 
 MODES: Final = ("offline", "semantic", "hybrid")
 BRIDGE_CANDIDATES: Final = 20
+PREWARM_QUERY: Final = "SwiftUI View"
+PREWARM_LIMIT: Final = 3
 
 
 def default_asset_root() -> Path:
@@ -187,6 +190,7 @@ def search(
         frameworks=frameworks,
         kinds=kinds,
         limit=limit if mode == "offline" else BRIDGE_CANDIDATES,
+        total_documents=index_state.documents,
     )
 
     if mode == "offline":
@@ -199,6 +203,29 @@ def search(
         index=index_state,
         bridge_error=bridge_error,
     )
+
+
+def prewarm(*, settings: Settings | None = None) -> bool:
+    """Warm the index pages and the page cache for the first real query.
+
+    Returns whether the warm-up ran. A missing or stale index is deliberately
+    left alone: building it is a five-second job that belongs to the caller's
+    first search, and racing it from a background thread would only duplicate
+    work.
+    """
+    resolved = _settings(settings)
+    db_path = _corpus_path(resolved)
+    if db_path is None:
+        return False
+
+    state = index_info(db_path, resolved.cache_dir)
+    if state is None or not state.fresh or not state.usable:
+        return False
+
+    search_offline(
+        db_path, state.path, PREWARM_QUERY, limit=PREWARM_LIMIT, total_documents=state.documents
+    )
+    return True
 
 
 def playbook(*, settings: Settings | None = None) -> Playbook:

@@ -18,7 +18,7 @@ only when its semantic ranking is wanted. The two paths measured on this machine
 | | Xcode `DocumentationSearch` | this server, `mode: offline` |
 |---|---|---|
 | Requires | Xcode running, workspace open, per-process approval, 24 h expiry | nothing |
-| Latency, mean of 6 queries | 264–357 ms across runs | **4–43 ms**, 10 ms in the MCP server path |
+| Latency, mean of 6 queries | 264–371 ms across runs | **5.9 ms** in the MCP server; 2–17 ms across runs |
 | Latency, single page fetch | not available | 2 ms |
 | Corpus reachable | the 20 documents the tool returns | 263,513 pages, searchable |
 | Text per result | fragment, 46–5,305 chars (median 437) | the whole page (up to 375,908 chars) |
@@ -26,9 +26,10 @@ only when its semantic ranking is wanted. The two paths measured on this machine
 | Index build | n/a | 263,513 pages in 5.3 s, 128 MB |
 
 Reproduce all of it on your own machine — `uv run python tools/benchmark.py`. The
-offline figures move with the OS page cache: 4 ms warm, 43 ms when the first
-query lands on uncached index pages, 10 ms mean over six queries in a running
-MCP server.
+offline figures move with the OS page cache, so the script reports the first call
+of a fresh process separately from the steady state: 5 ms first call, 17 ms mean
+over six queries in a standalone process, 5.9 ms mean over the same six in a
+running MCP server that warmed itself at startup.
 
 Judged query by query on top three results, the offline ranking was better on
 four of those six queries, a wash on one, and worse on one ("how do I make a
@@ -137,11 +138,14 @@ alone: it is opened read-only and immutable, and never written to.
 ### The derived index
 
 - Built once per corpus version, in `~/Library/Caches/apple-docs-mcp/`.
-- 128 MB for 263,513 pages; 5.3 s to build; atomic swap, so an interrupted build
-  never leaves a half-index.
+- 118 MB for 263,513 pages; 5.3 s to build; atomic swap, so an interrupted build
+  never leaves a half-index. An index from an older schema is deleted on the next
+  build instead of lingering.
 - Contentless FTS5 — the index holds tokens, and page text is read back from the
-  corpus for the handful of pages a query returns. That is why it is 128 MB and
+  corpus for the handful of pages a query returns. That is why it is 118 MB and
   not 500 MB.
+- Term statistics live in the index (`fts5vocab`), which is what lets a query be
+  built from its selective words without touching the corpus.
 - Freshness is decided from the corpus file's size and mtime plus the index
   schema version.
 
@@ -165,8 +169,9 @@ where it looked instead of returning nothing.
 
 ## Limitations
 
-- Ranking is BM25 with column weights plus an identifier boost. It is not
-  semantic; use `semantic` or `hybrid` when meaning matters more than terms.
+- Ranking is BM25 over the query's selective terms, with column weights biased
+  toward the URI and title plus an identifier boost. It is not semantic; use
+  `semantic` or `hybrid` when meaning matters more than terms.
 - The corpus is written by Xcode, so a page can be a section rather than an
   article ("…: Relationships"). Such sections are short by construction.
 - Xcode can purge the asset (`…xml.purged` appears next to it). If the corpus
@@ -197,7 +202,7 @@ Measured 2026-09-17, not assumed:
 | Xcode | 27.0 (27A266a) |
 | Swift | 6.4 (swiftlang-6.4.0.34.1) |
 | Documentation corpus | 263,513 pages, 375 frameworks, ~375 MB of text |
-| Derived index | 128 MB, built in 5.3 s |
+| Derived index | 118 MB, built in 5.3 s |
 
 ## License
 

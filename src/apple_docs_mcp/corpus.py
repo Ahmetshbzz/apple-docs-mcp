@@ -21,9 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from apple_docs_mcp.connections import shared
+
 __all__ = [
     "ASSET_ROOT",
     "DB_RELATIVE_PATH",
+    "PAGE_CACHE_CHARACTERS",
     "DocumentRecord",
     "DocumentationDBMissingError",
     "count_documents",
@@ -40,6 +43,9 @@ ASSET_ROOT: Final = Path(
 )
 DB_RELATIVE_PATH: Final = Path("documentation-db") / "index.sql"
 DB_BUNDLE_GLOB: Final = "*.asset/AssetData/" + DB_RELATIVE_PATH.as_posix()
+
+#: Page text is cached up to this many characters (~a few thousand pages).
+PAGE_CACHE_CHARACTERS: Final = 4_000_000
 
 _SYMBOL_KIND: Final = "symbol"
 _DECLARATION_PATTERN: Final = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
@@ -265,25 +271,70 @@ def get_documents(db_path: Path, uris: list[str]) -> dict[str, DocumentRecord]:
     """Return several pages in one round trip, keyed by URI.
 
     A search returns a handful of pages; loading them through a single
-    connection keeps the call off the per-page connection cost.
+    connection keeps the call off the per-page connection cost. The corpus is a
+    1.2 GB file, so pages that a session has already read are kept in a small
+    bounded cache — repeated questions about the same APIs would otherwise pay
+    for random reads again.
     """
     if not uris:
         return {}
 
-    connection = connect(db_path)
-    try:
-        placeholders = ",".join("?" for _ in uris)
+    found: dict[str, DocumentRecord] = {}
+    missing: list[str] = []
+    for uri in uris:
+        cached = _PAGE_CACHE.get((str(db_path), uri))
+        if cached is None:
+            missing.append(uri)
+        else:
+            found[uri] = cached
+
+    if missing:
+        connection = shared(db_path, connect)
+        placeholders = ",".join("?" for _ in missing)
         rows = connection.execute(
             f"select {_SELECT_COLUMNS} from documents where asset_id in ({placeholders})",
-            uris,
+            missing,
         ).fetchall()
-    finally:
-        connection.close()
 
-    records: dict[str, DocumentRecord] = {}
-    for row in rows:
-        if not isinstance(row[0], str):
-            continue
-        record = _record(row)
-        records[record.uri] = record
-    return records
+        for row in rows:
+            if not isinstance(row[0], str):
+                continue
+            record = _record(row)
+            found[record.uri] = record
+            _remember(db_path, record)
+    return found
+
+
+class _PageCache:
+    """A bounded FIFO cache of recently read pages, capped by total characters."""
+
+    __slots__ = ("_entries", "_characters", "limit")
+
+    def __init__(self, limit: int = PAGE_CACHE_CHARACTERS) -> None:
+        self.limit = limit
+        self._entries: dict[tuple[str, str], DocumentRecord] = {}
+        self._characters = 0
+
+    def get(self, key: tuple[str, str]) -> DocumentRecord | None:
+        return self._entries.get(key)
+
+    def put(self, key: tuple[str, str], record: DocumentRecord) -> None:
+        size = len(record.content)
+        if size > self.limit:
+            return
+        while self._characters + size > self.limit and self._entries:
+            oldest = next(iter(self._entries))
+            self._characters -= len(self._entries.pop(oldest).content)
+        self._entries[key] = record
+        self._characters += size
+
+    def clear(self) -> None:
+        self._entries.clear()
+        self._characters = 0
+
+
+_PAGE_CACHE: Final = _PageCache()
+
+
+def _remember(db_path: Path, record: DocumentRecord) -> None:
+    _PAGE_CACHE.put((str(db_path), record.uri), record)

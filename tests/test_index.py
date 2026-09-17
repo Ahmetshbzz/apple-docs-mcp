@@ -117,6 +117,20 @@ def test_index_meta_records_the_corpus_identity(asset_with_documents: Path, tmp_
     assert info.built_at > 0
 
 
+def test_building_removes_indexes_from_older_schema_versions(
+    asset_with_documents: Path, tmp_path: Path
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    stale = cache / "index-v1.sqlite"
+    stale.write_bytes(b"old")
+
+    info = build_index(find_documentation_db(asset_with_documents), cache)
+
+    assert not stale.exists()
+    assert info.path.is_file()
+
+
 def test_index_path_is_stable_for_a_cache_directory(tmp_path: Path) -> None:
     assert index_path(tmp_path).parent == tmp_path
     assert index_path(tmp_path).name == f"index-v{INDEX_SCHEMA_VERSION}.sqlite"

@@ -9,6 +9,7 @@ corpus is authoritative for text, the bridge for meaning.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Annotated, Final
 
@@ -32,6 +33,7 @@ from apple_docs_mcp.service import (
     document,
     frameworks,
     playbook,
+    prewarm,
     reference,
     search,
     status,
@@ -243,6 +245,10 @@ def create_server(settings: Settings | None = None) -> MCPServer:
 
 
 def main() -> None:
+    # The first search otherwise pays for index pages the OS has not cached yet.
+    # The warm-up is best effort: if it fails, the search that follows reports
+    # the real error, and an unexpected failure here stays visible on stderr.
+    threading.Thread(target=prewarm, daemon=True).start()
     create_server().run(transport="stdio")
 
 

@@ -70,6 +70,81 @@ def test_get_document_returns_none_for_an_unknown_uri(asset_with_documents: Path
     assert get_document(find_documentation_db(asset_with_documents), "/documentation/Nope") is None
 
 
+def test_repeated_page_reads_are_served_from_the_cache(
+    asset_with_documents: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from apple_docs_mcp import corpus
+
+    db_path = find_documentation_db(asset_with_documents)
+    assert db_path is not None
+    corpus._PAGE_CACHE.clear()
+
+    opens = 0
+    original = corpus.connect
+
+    def counting_connect(path: Path):
+        nonlocal opens
+        opens += 1
+        return original(path)
+
+    monkeypatch.setattr(corpus, "connect", counting_connect)
+    uri = "/documentation/SwiftData/ModelContainer"
+
+    first = get_document(db_path, uri)
+    opens_after_first = opens
+    second = get_document(db_path, uri)
+
+    assert first == second
+    assert opens_after_first == 1
+    assert opens == opens_after_first, "a cached page must not reopen the corpus"
+    corpus._PAGE_CACHE.clear()
+
+
+def test_page_cache_evicts_the_oldest_entry_when_full(asset_with_documents: Path) -> None:
+    from apple_docs_mcp.corpus import DocumentRecord, _PageCache
+
+    cache = _PageCache(limit=10)
+
+    def page(uri: str, size: int) -> DocumentRecord:
+        return DocumentRecord(
+            uri=uri,
+            title="t",
+            framework="f",
+            kind="symbol",
+            role="",
+            parent_uri="",
+            content="x" * size,
+            symbol="",
+            platforms="",
+        )
+
+    cache.put(("/db", "/a"), page("/a", 6))
+    cache.put(("/db", "/b"), page("/b", 6))
+
+    assert cache.get(("/db", "/a")) is None, "the oldest page must be evicted"
+    assert cache.get(("/db", "/b")) is not None
+
+
+def test_page_cache_skips_pages_larger_than_its_limit() -> None:
+    from apple_docs_mcp.corpus import DocumentRecord, _PageCache
+
+    cache = _PageCache(limit=4)
+    oversized = DocumentRecord(
+        uri="/big",
+        title="t",
+        framework="f",
+        kind="symbol",
+        role="",
+        parent_uri="",
+        content="x" * 500,
+        symbol="",
+        platforms="",
+    )
+    cache.put(("/db", "/big"), oversized)
+
+    assert cache.get(("/db", "/big")) is None
+
+
 def test_missing_database_raises_a_typed_error(tmp_path: Path) -> None:
     with pytest.raises(DocumentationDBMissingError):
         count_documents(tmp_path / "absent.sql")

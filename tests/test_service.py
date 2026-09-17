@@ -12,6 +12,7 @@ from apple_docs_mcp.service import (
     document,
     frameworks,
     playbook,
+    prewarm,
     reference,
     search,
     status,
@@ -192,6 +193,26 @@ def test_status_reports_corpus_and_index_without_probing_the_bridge(settings: Se
     assert report.searchable is True
     assert report.bridge_documents is None
     assert report.bridge_error is None
+
+
+def test_prewarm_does_not_build_a_missing_index(settings: Settings) -> None:
+    from apple_docs_mcp.index import index_info
+
+    assert prewarm(settings=settings) is False
+    db_path = settings.asset_root / "fixture.asset" / "AssetData" / "documentation-db" / "index.sql"
+    assert index_info(db_path, settings.cache_dir) is None
+
+
+def test_prewarm_warms_a_fresh_index(settings: Settings) -> None:
+    build(settings=settings)
+
+    assert prewarm(settings=settings) is True
+
+
+def test_prewarm_reports_a_missing_corpus(tmp_path: Path) -> None:
+    settings = Settings(asset_root=tmp_path / "none", cache_dir=tmp_path)
+
+    assert prewarm(settings=settings) is False
 
 
 def test_playbook_reads_the_configured_skill_directory(skill_directory: Path, tmp_path: Path) -> None:

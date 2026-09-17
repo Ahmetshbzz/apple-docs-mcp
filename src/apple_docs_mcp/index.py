@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -37,13 +38,17 @@ __all__ = [
     "open_index",
 ]
 
-INDEX_SCHEMA_VERSION: Final = 1
+INDEX_SCHEMA_VERSION: Final = 2
 
 # FTS5 needs the identifier characters kept inside tokens: ``View.body`` and
 # ``NSApplicationDelegate`` must not be split into pieces.
 _TOKENIZER: Final = "unicode61 remove_diacritics 2 tokenchars '_.:'"
 
 BUILD_BATCH: Final = 4000
+
+#: Two callers can reach a cold index at once (a warm-up thread and a first
+#: search). Building writes a fixed temporary file, so only one build may run.
+_BUILD_LOCK: Final = threading.Lock()
 
 
 def default_cache_dir() -> Path:
@@ -176,6 +181,13 @@ def build_index(db_path: Path, cache_dir: Path) -> IndexInfo:
             );
             """
         )
+        # Term statistics, so a query can be built from its most selective words
+        # instead of OR-ing everything and scoring tens of thousands of pages.
+        derived.executescript(
+            """
+            create virtual table docs_vocab using fts5vocab(docs_fts, 'row');
+            """
+        )
 
         batch: list[tuple[int, str, str, str, str, str]] = []
         next_id = 1
@@ -215,6 +227,7 @@ def build_index(db_path: Path, cache_dir: Path) -> IndexInfo:
         )
 
     os.replace(temporary, target)
+    _remove_stale_indexes(target)
     return IndexInfo(
         path=target,
         documents=documents,
@@ -225,6 +238,13 @@ def build_index(db_path: Path, cache_dir: Path) -> IndexInfo:
         fresh=True,
         rebuilt=True,
     )
+
+
+def _remove_stale_indexes(current: Path) -> None:
+    """Delete indexes built for an older schema; they are dead weight."""
+    for candidate in current.parent.glob("index-v*.sqlite"):
+        if candidate != current:
+            candidate.unlink(missing_ok=True)
 
 
 def _insert_batch(
@@ -279,9 +299,9 @@ def ensure_index(
             "Xcode's Settings > Components > Developer Documentation."
         )
 
-    if not force:
-        existing = index_info(db_path, cache_dir)
-        if existing is not None and existing.fresh and existing.usable:
-            return existing
-
-    return build_index(db_path, cache_dir)
+    with _BUILD_LOCK:
+        if not force:
+            existing = index_info(db_path, cache_dir)
+            if existing is not None and existing.fresh and existing.usable:
+                return existing
+        return build_index(db_path, cache_dir)

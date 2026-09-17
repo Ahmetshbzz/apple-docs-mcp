@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from apple_docs_mcp.bridge import Document
+from apple_docs_mcp.connections import shared
+from apple_docs_mcp.index import open_index
 from apple_docs_mcp.search import (
     Hit,
     bridge_hits,
@@ -14,6 +16,8 @@ from apple_docs_mcp.search import (
     identifier_in,
     make_snippet,
     search_offline,
+    select_terms,
+    term_document_frequencies,
     tokenize_query,
 )
 
@@ -35,6 +39,72 @@ def test_build_match_query_quotes_every_term() -> None:
 def test_build_match_query_rejects_an_empty_query() -> None:
     with pytest.raises(ValueError):
         build_match_query("   ")
+
+
+def test_build_match_query_can_be_narrowed_to_selected_terms() -> None:
+    assert build_match_query("anything", ["SwiftUI", "View"]) == '"SwiftUI" OR "View"'
+
+
+def test_select_terms_drops_terms_that_cannot_narrow_the_corpus() -> None:
+    frequencies = {"model": 40_000, "inheritance": 120, "swiftdata": 800}
+
+    assert select_terms(["model", "inheritance", "swiftdata"], frequencies, 263_513) == [
+        "inheritance",
+        "swiftdata",
+    ]
+
+
+def test_select_terms_keeps_the_rarest_when_every_term_is_common() -> None:
+    frequencies = {"view": 30_000, "model": 40_000, "data": 50_000}
+
+    assert select_terms(["view", "model", "data"], frequencies, 263_513) == ["view", "model"]
+
+
+def test_select_terms_leaves_a_single_term_alone() -> None:
+    assert select_terms(["view"], {"view": 30_000}, 263_513) == ["view"]
+
+
+def test_select_terms_drops_unknown_terms_when_a_known_one_exists() -> None:
+    """A term the index has never seen can only make a strict pass match nothing."""
+    frequencies = {"zzzznotpresent": 0, "swiftui": 10_000}
+
+    assert select_terms(["zzzznotpresent", "swiftui"], frequencies, 263_513) == ["swiftui"]
+
+
+def test_select_terms_keeps_unknown_terms_when_nothing_is_known() -> None:
+    frequencies = {"zzzz": 0, "yyyy": 0}
+
+    assert select_terms(["zzzz", "yyyy"], frequencies, 263_513) == ["zzzz", "yyyy"]
+
+
+def test_select_terms_caps_the_number_of_terms() -> None:
+    frequencies = {f"term{index}": index + 1 for index in range(10)}
+    selected = select_terms(list(frequencies), frequencies, 263_513, max_terms=3)
+
+    assert selected == ["term0", "term1", "term2"]
+
+
+def test_term_document_frequencies_come_from_the_index(indexed_asset: tuple[Path, Path]) -> None:
+    _, index_file = indexed_asset
+    connection = shared(index_file, open_index)
+
+    frequencies = term_document_frequencies(connection, ["inheritance", "zzzznotpresent"])
+
+    assert frequencies == {"inheritance": 1}
+
+
+def test_search_offline_still_answers_when_no_page_carries_every_term(
+    indexed_asset: tuple[Path, Path],
+) -> None:
+    """A strict pass can come back empty; the loose pass must still answer."""
+    db_path, index_file = indexed_asset
+    hits = search_offline(db_path, index_file, "inheritance container", total_documents=3)
+
+    assert hits, "the OR pass must fill in when the AND pass matches nothing"
+    assert {hit.uri for hit in hits} == {
+        "/documentation/SwiftData/Adopting-inheritance-in-SwiftData",
+        "/documentation/SwiftData/ModelContainer",
+    }
 
 
 def test_identifier_in_finds_dotted_and_camel_case_names() -> None:
