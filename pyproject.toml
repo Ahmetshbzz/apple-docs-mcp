@@ -1,0 +1,47 @@
+[project]
+name = "apple-docs-mcp"
+version = "0.1.0"
+description = "MCP server and CLI for offline Apple Developer Documentation via Xcode's local documentation index"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.0",
+]
+
+[project.scripts]
+apple-docs-mcp = "apple_docs_mcp.server:main"
+apple-docs = "apple_docs_mcp.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/apple_docs_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: exercises the live Xcode MCP bridge (deselect with -m 'not integration')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures come from pytest and need no annotations; long assertion lines
+# read better than wrapped ones.
+"tests/*" = ["ANN001", "ANN201", "ANN202", "E501"]
