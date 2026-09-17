@@ -102,6 +102,35 @@ a space `NLContextualEmbedding` does not reproduce (measured cosine ≈ 0.01–0
 for the *same* page text). And it is not a better search engine than Xcode's —
 it is the same corpus with different plumbing.
 
+## Relationship to Xcode's own MCP server
+
+Xcode ships an MCP server (`xcrun mcpbridge`) that advertises **54 tools**. Read
+the list, because the comparison is narrower than the counts suggest: exactly
+**one** of the 54 is documentation.
+
+| What the 54 cover | Examples |
+|---|---|
+| Building, running, testing, debugging | `BuildProject`, `RunProject`, `RunAllTests`, `InvokeDebuggerCommand`, `GetBuildLog` |
+| Devices and previews | `DeviceInteractionSynthesize`, `RenderPreview`, `RunCodeSnippet` |
+| Project files and settings | `XcodeRead`, `XcodeWrite`, `XcodeGrep`, `UpdateTargetBuildSetting` |
+| Localisation, crash and performance retrieval | `StringCatalogEdit`, `GetTopCrashIssues` |
+| **Documentation** | `DocumentationSearch` |
+
+So this server is not a replacement for that one and does not try to be: it
+answers documentation questions, and only the last row of that table overlaps
+with what it does. If you want the other 53 — build, run, debug, device
+control — register Xcode's server as well:
+
+```bash
+claude mcp add xcode-tools -- xcrun mcpbridge
+```
+
+Two things are worth knowing before you do. That server needs Xcode running with
+an approved workspace, and it hands the agent write and execute access to your
+project; this one reads documentation and nothing else. Run both if you want
+both, and route documentation at whichever answers your kind of question better —
+the evaluation above is the evidence for that choice.
+
 ## Install
 
 Requires macOS and Xcode with the Developer Documentation asset installed.
