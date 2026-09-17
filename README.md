@@ -18,12 +18,17 @@ only when its semantic ranking is wanted. The two paths measured on this machine
 | | Xcode `DocumentationSearch` | this server, `mode: offline` |
 |---|---|---|
 | Requires | Xcode running, workspace open, per-process approval, 24 h expiry | nothing |
-| Latency, mean of 6 queries | 311 ms | **10 ms** |
+| Latency, mean of 6 queries | 264–357 ms across runs | **4–43 ms**, 10 ms in the MCP server path |
 | Latency, single page fetch | not available | 2 ms |
 | Corpus reachable | the 20 documents the tool returns | 263,513 pages, searchable |
 | Text per result | fragment, 46–5,305 chars (median 437) | the whole page (up to 375,908 chars) |
 | Fields per result | title, uri, contents, score, kind | plus declaration, availability, framework, kind, USR |
 | Index build | n/a | 263,513 pages in 5.3 s, 128 MB |
+
+Reproduce all of it on your own machine — `uv run python tools/benchmark.py`. The
+offline figures move with the OS page cache: 4 ms warm, 43 ms when the first
+query lands on uncached index pages, 10 ms mean over six queries in a running
+MCP server.
 
 Judged query by query on top three results, the offline ranking was better on
 four of those six queries, a wash on one, and worse on one ("how do I make a
@@ -87,7 +92,7 @@ The playbook is also served as the `swift://playbook` resource, the
 
 | Mode | What answers | Measured latency | Xcode needed |
 |---|---|---|---|
-| `offline` (default) | the local corpus index | 3–23 ms | no |
+| `offline` (default) | the local corpus index | 3–23 ms in the MCP server | no |
 | `semantic` | Xcode's bridge | 185–739 ms | yes, approved |
 | `hybrid` | both, fused by reciprocal rank | 313–434 ms | no (falls back to offline) |
 
@@ -174,6 +179,7 @@ where it looked instead of returning nothing.
 ```bash
 uv run pytest tests/ -q                    # 125 tests, no Xcode needed
 uv run pytest tests/ -m integration        # live bridge tests
+uv run python tools/benchmark.py           # the comparison table above
 uv run ruff check src tests
 ```
 
